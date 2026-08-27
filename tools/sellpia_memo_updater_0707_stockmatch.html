@@ -969,6 +969,10 @@
       ambiguous.add(key);
     }
 
+    function hasOrderMemoWriteTarget(row) {
+      return !!normal(row?.order_memo) || !!normal(row?.order_memo_updated_at);
+    }
+
     function addOrderMemoTarget(task, row) {
       // Order memo is a per-Sellpia-order-item target. Keep exact matching
       // first, but index both DB identities because Sellpia grids can expose
@@ -984,8 +988,10 @@
         identity,
         value: normal(row?.order_memo),
         itemNo,
-        sellpiaOrderItemNo
+        sellpiaOrderItemNo,
+        requested: hasOrderMemoWriteTarget(row)
       };
+      if (baseTarget.requested) task.orderMemoRequestedCount++;
       const exactEntries = [
         [sellpiaOrderItemNo, 'sellpia_order_item_no_exact'],
         [itemNo, 'item_no_exact']
@@ -1019,6 +1025,7 @@
       ].map(normal).filter(Boolean))];
       const missing = warning => ({
         found: false,
+        known: false,
         value: '',
         matchMethod: 'none',
         matchedItemNo: '',
@@ -1037,8 +1044,19 @@
       if (exactIdentities.size > 1) return missing('order_memo_target_ambiguous');
       if (exactMatches.length) {
         const { target, candidate } = exactMatches[0];
+        if (!target.requested) {
+          return {
+            found: false,
+            known: true,
+            value: '',
+            matchMethod: target.matchMethod,
+            matchedItemNo: candidate,
+            warning: ''
+          };
+        }
         return {
           found: true,
+          known: true,
           value: target.value,
           matchMethod: target.matchMethod,
           matchedItemNo: candidate,
@@ -1059,8 +1077,19 @@
       if (normalizedIdentities.size > 1) return missing('order_memo_target_ambiguous');
       if (normalizedMatches.length) {
         const { target, candidate } = normalizedMatches[0];
+        if (!target.requested) {
+          return {
+            found: false,
+            known: true,
+            value: '',
+            matchMethod: 'prefix_stripped_unique',
+            matchedItemNo: candidate,
+            warning: ''
+          };
+        }
         return {
           found: true,
+          known: true,
           value: target.value,
           matchMethod: 'prefix_stripped_unique',
           matchedItemNo: candidate,
@@ -1332,7 +1361,8 @@
 
     function orderMemoSourceForGridRow(task, row, index) {
       const target = orderMemoTargetForGridRow(task, row, index);
-      return target.found ? 'item_level_' + target.matchMethod : 'none';
+      if (target.found) return 'item_level_' + target.matchMethod;
+      return target.known ? 'not_requested' : 'none';
     }
 
     function plannedOrderMemoForGridRow(task, row, index, currentOrderMemo) {
@@ -1513,6 +1543,7 @@
         orderMemoAmbiguousKeys: new Set(),
         orderMemoNormalizedMap: new Map(),
         orderMemoNormalizedAmbiguousKeys: new Set(),
+        orderMemoRequestedCount: 0,
         outboundConfirmedDateTargets: new Map(),
         outboundConfirmedDateAmbiguous: new Set(),
         partialHoldTargets: new Map(),
@@ -1597,7 +1628,7 @@
       const hasMemo2Clear = false;
       const allShortageItemsRepicked = false;
       const hasSystemMatch = hasShortageMatch || hasPickingMatch || hasOrderMatch || orderItemRows.length > 0;
-      const hasOrderMemoValue = hasSystemMatch && orderItemRows.length > 0;
+      const hasOrderMemoValue = hasSystemMatch && task.orderMemoRequestedCount > 0;
       const memo1HoldSignal = false;
       // A shortage table row can be absent even while another item still has an
       // active memo2 target (for example, a shortage reopened after repick).
@@ -1662,7 +1693,7 @@
           dbRequestIn('shortage', 'ord_no', ordNos, 'inv_no,ord_no,item_no,p_code,sellpia_p_code,status,memo2_val,drawer_no,updated_at'),
           dbRequestIn('picking', 'ord_no', ordNos, 'inv_no,ord_no,item_no,p_code,sellpia_p_code,hold,drawer_no'),
           dbRequestIn('orders', 'ord_no', ordNos, 'ord_no,inv_no,order_memo,o_memo,sellpia_outbound_scheduled_date,scraped_at,sellpia_shipping_hold_status,sellpia_shipping_hold_raw,sellpia_shipping_hold_scraped_at,system_shipping_hold_status,system_shipping_hold_source,system_shipping_hold_updated_at'),
-          dbRequestIn('order_items', 'ord_no', ordNos, 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,sellpia_outbound_confirmed_date'),
+          dbRequestIn('order_items', 'ord_no', ordNos, 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,order_memo_updated_at,sellpia_outbound_confirmed_date'),
           safeDbRequestIn('workflow_invoice_events', 'order_group_no', ordNos, 'order_group_no,event_type,event_at,created_at,id,memo,source'),
           safeDbRequestIn('workflow_item_events', 'order_group_no', ordNos, 'order_group_no,event_type,event_at,created_at,id,sellpia_item_no,sellpia_product_code')
         ]);
@@ -1823,7 +1854,7 @@
             dbRequestIn('shortage', 'ord_no', [ordNoFromDb], 'inv_no,ord_no,item_no,p_code,sellpia_p_code,status,memo2_val,drawer_no,updated_at'),
             dbRequestIn('picking', 'ord_no', [ordNoFromDb], 'inv_no,ord_no,item_no,p_code,sellpia_p_code,hold,drawer_no'),
             dbRequestIn('orders', 'ord_no', [ordNoFromDb], 'ord_no,inv_no,order_memo,o_memo,sellpia_outbound_scheduled_date,scraped_at,sellpia_shipping_hold_status,sellpia_shipping_hold_raw,sellpia_shipping_hold_scraped_at,system_shipping_hold_status,system_shipping_hold_source,system_shipping_hold_updated_at'),
-            dbRequestIn('order_items', 'ord_no', [ordNoFromDb], 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,sellpia_outbound_confirmed_date'),
+            dbRequestIn('order_items', 'ord_no', [ordNoFromDb], 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,order_memo_updated_at,sellpia_outbound_confirmed_date'),
             safeDbRequestIn('workflow_invoice_events', 'order_group_no', [ordNoFromDb], 'order_group_no,event_type,event_at,created_at,id,memo,source'),
             safeDbRequestIn('workflow_item_events', 'order_group_no', [ordNoFromDb], 'order_group_no,event_type,event_at,created_at,id,sellpia_item_no,sellpia_product_code')
           ]);
@@ -1844,7 +1875,7 @@
           dbRequestIn('shortage', 'ord_no', [ordNo], 'inv_no,ord_no,item_no,p_code,sellpia_p_code,status,memo2_val,drawer_no,updated_at'),
           dbRequestIn('picking', 'ord_no', [ordNo], 'inv_no,ord_no,item_no,p_code,sellpia_p_code,hold,drawer_no'),
           dbRequestIn('orders', 'ord_no', [ordNo], 'ord_no,inv_no,order_memo,o_memo,sellpia_outbound_scheduled_date,scraped_at,sellpia_shipping_hold_status,sellpia_shipping_hold_raw,sellpia_shipping_hold_scraped_at,system_shipping_hold_status,system_shipping_hold_source,system_shipping_hold_updated_at'),
-          dbRequestIn('order_items', 'ord_no', [ordNo], 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,sellpia_outbound_confirmed_date'),
+          dbRequestIn('order_items', 'ord_no', [ordNo], 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,order_memo_updated_at,sellpia_outbound_confirmed_date'),
           safeDbRequestIn('workflow_invoice_events', 'order_group_no', [ordNo], 'order_group_no,event_type,event_at,created_at,id,memo,source'),
           safeDbRequestIn('workflow_item_events', 'order_group_no', [ordNo], 'order_group_no,event_type,event_at,created_at,id,sellpia_item_no,sellpia_product_code')
         ]);
@@ -1896,7 +1927,7 @@
         dbRequestIn('shortage', 'ord_no', ordNos, 'inv_no,ord_no,item_no,p_code,sellpia_p_code,status,memo2_val,drawer_no,updated_at'),
         dbRequestIn('picking', 'ord_no', ordNos, 'inv_no,ord_no,item_no,p_code,sellpia_p_code,hold,drawer_no'),
         dbRequestIn('orders', 'ord_no', ordNos, 'ord_no,inv_no,order_memo,o_memo,sellpia_outbound_scheduled_date,scraped_at,sellpia_shipping_hold_status,sellpia_shipping_hold_raw,sellpia_shipping_hold_scraped_at,system_shipping_hold_status,system_shipping_hold_source,system_shipping_hold_updated_at'),
-        dbRequestIn('order_items', 'ord_no', ordNos, 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,sellpia_outbound_confirmed_date'),
+        dbRequestIn('order_items', 'ord_no', ordNos, 'ord_no,item_no,sellpia_order_item_no,p_code,o_shop_memo,o_shop_memo2,order_memo,order_memo_updated_at,sellpia_outbound_confirmed_date'),
         safeDbRequestIn('workflow_invoice_events', 'order_group_no', ordNos, 'order_group_no,event_type,event_at,created_at,id,memo,source'),
         safeDbRequestIn('workflow_item_events', 'order_group_no', ordNos, 'order_group_no,event_type,event_at,created_at,id,sellpia_item_no,sellpia_product_code')
       ]);
