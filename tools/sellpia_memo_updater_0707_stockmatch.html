@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>0812-합배송오류수정</title>
+<title>0827-합배송주문메모오류수정</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background:#141414; color:#f0f0f0; font-family:Arial,'Noto Sans KR',sans-serif; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
@@ -18,7 +18,7 @@
 </head>
 <body>
 <div class="card">
-  <h1>0812-합배송오류수정</h1>
+  <h1>0827-합배송주문메모오류수정</h1>
   <div class="sub">재고매칭(order_stockmatch.html) 전용 / 테스트 모드 기본 ON</div>
   <div class="note">
     <b>테스트 모드(저장 안 함)</b><br>
@@ -26,7 +26,7 @@
     관리메모/관리메모2/주문메모 저장, 배송보류 설정/해제, DB PATCH는 테스트모드에서 실행하지 않습니다.<br>
     결과 CSV에는 현재 셀피아 값, 시스템 예정값, 변경 필요 여부, 매칭 실패/상세없음 예외, 상태 사유가 들어갑니다.
   </div>
-  <a id="bookmarklet-link" class="btn" href="#">0812-합배송오류수정</a>
+  <a id="bookmarklet-link" class="btn" href="#">0827-합배송주문메모오류수정</a>
   <pre id="code-display">loading...</pre>
   <button id="copy-btn">코드 복사</button>
 </div>
@@ -957,29 +957,117 @@
       return hasItemAlias(set, row, ordNo);
     }
 
-    function addOrderMemoTarget(task, row) {
-      // Order memo is a per-Sellpia-order-item target.  Do not reuse the
-      // broader item aliases used by memo2: a blank target must stay blank
-      // and must never inherit another row's value.
-      const ordNo = normal(task?.ordNo || row?.ord_no);
-      const sellpiaOrderItemNo = normal(row?.sellpia_order_item_no);
-      if (!ordNo || !sellpiaOrderItemNo) return;
-      const key = ordNo + '::' + sellpiaOrderItemNo;
-      if (task.orderMemoMap.has(key)) {
-        task.orderMemoAmbiguousKeys.add(key);
+    function addOrderMemoIndexEntry(map, ambiguous, key, target) {
+      if (!key || ambiguous.has(key)) return;
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, target);
         return;
       }
-      task.orderMemoMap.set(key, normal(row.order_memo));
+      if (existing.identity === target.identity) return;
+      map.delete(key);
+      ambiguous.add(key);
+    }
+
+    function addOrderMemoTarget(task, row) {
+      // Order memo is a per-Sellpia-order-item target. Keep exact matching
+      // first, but index both DB identities because Sellpia grids can expose
+      // either the regular item number or the prefixed internal item number.
+      // Prefix-stripped aliases are order-scoped and may resolve only when the
+      // candidate is unique. A blank target remains a real target for clears.
+      const ordNo = normal(task?.ordNo || row?.ord_no);
+      const sellpiaOrderItemNo = normal(row?.sellpia_order_item_no);
+      const itemNo = normal(row?.item_no);
+      if (!ordNo || (!sellpiaOrderItemNo && !itemNo)) return;
+      const identity = ordNo + '::' + (itemNo || sellpiaOrderItemNo) + '|' + sellpiaOrderItemNo;
+      const baseTarget = {
+        identity,
+        value: normal(row?.order_memo),
+        itemNo,
+        sellpiaOrderItemNo
+      };
+      const exactEntries = [
+        [sellpiaOrderItemNo, 'sellpia_order_item_no_exact'],
+        [itemNo, 'item_no_exact']
+      ];
+      for (const [candidate, matchMethod] of exactEntries) {
+        const key = candidate ? ordNo + '::' + candidate : '';
+        addOrderMemoIndexEntry(task.orderMemoMap, task.orderMemoAmbiguousKeys, key, {
+          ...baseTarget,
+          matchMethod
+        });
+      }
+      const normalizedCandidates = [...new Set([sellpiaOrderItemNo, itemNo]
+        .map(normalizeItemKeyForMatch)
+        .filter(Boolean))];
+      for (const candidate of normalizedCandidates) {
+        addOrderMemoIndexEntry(
+          task.orderMemoNormalizedMap,
+          task.orderMemoNormalizedAmbiguousKeys,
+          ordNo + '::' + candidate,
+          { ...baseTarget, matchMethod: 'prefix_stripped_unique' }
+        );
+      }
     }
 
     function orderMemoTargetForGridRow(task, row, index) {
       const ordNo = normal(task?.ordNo || rowOrdNo(row));
-      const sellpiaOrderItemNo = normal(rowItemNoStrict(row));
-      const key = ordNo && sellpiaOrderItemNo ? ordNo + '::' + sellpiaOrderItemNo : '';
-      if (!key || task?.orderMemoAmbiguousKeys?.has(key) || !task?.orderMemoMap?.has(key)) {
-        return { found: false, value: '' };
+      const candidates = [...new Set([
+        rowItemNoStrict(row),
+        rowItemNo(row, index),
+        normal(row?.c_prv_item_no)
+      ].map(normal).filter(Boolean))];
+      const missing = warning => ({
+        found: false,
+        value: '',
+        matchMethod: 'none',
+        matchedItemNo: '',
+        warning
+      });
+      if (!ordNo || !candidates.length) return missing('order_memo_target_missing');
+
+      const exactMatches = [];
+      for (const candidate of candidates) {
+        const key = ordNo + '::' + candidate;
+        if (task?.orderMemoAmbiguousKeys?.has(key)) return missing('order_memo_target_ambiguous');
+        const target = task?.orderMemoMap?.get(key);
+        if (target) exactMatches.push({ target, candidate });
       }
-      return { found: true, value: task.orderMemoMap.get(key) };
+      const exactIdentities = new Set(exactMatches.map(entry => entry.target.identity));
+      if (exactIdentities.size > 1) return missing('order_memo_target_ambiguous');
+      if (exactMatches.length) {
+        const { target, candidate } = exactMatches[0];
+        return {
+          found: true,
+          value: target.value,
+          matchMethod: target.matchMethod,
+          matchedItemNo: candidate,
+          warning: ''
+        };
+      }
+
+      const normalizedMatches = [];
+      for (const candidate of candidates) {
+        const normalized = normalizeItemKeyForMatch(candidate);
+        const key = normalized ? ordNo + '::' + normalized : '';
+        if (!key) continue;
+        if (task?.orderMemoNormalizedAmbiguousKeys?.has(key)) return missing('order_memo_target_ambiguous');
+        const target = task?.orderMemoNormalizedMap?.get(key);
+        if (target) normalizedMatches.push({ target, candidate });
+      }
+      const normalizedIdentities = new Set(normalizedMatches.map(entry => entry.target.identity));
+      if (normalizedIdentities.size > 1) return missing('order_memo_target_ambiguous');
+      if (normalizedMatches.length) {
+        const { target, candidate } = normalizedMatches[0];
+        return {
+          found: true,
+          value: target.value,
+          matchMethod: 'prefix_stripped_unique',
+          matchedItemNo: candidate,
+          warning: ''
+        };
+      }
+      return missing('order_memo_target_missing');
     }
 
     function managementTargetKey(ordNo, itemNo) {
@@ -1243,7 +1331,8 @@
     }
 
     function orderMemoSourceForGridRow(task, row, index) {
-      return orderMemoTargetForGridRow(task, row, index).found ? 'item_level' : 'none';
+      const target = orderMemoTargetForGridRow(task, row, index);
+      return target.found ? 'item_level_' + target.matchMethod : 'none';
     }
 
     function plannedOrderMemoForGridRow(task, row, index, currentOrderMemo) {
@@ -1267,7 +1356,9 @@
       const currentOrderMemo = normal(planned?.currentOrderMemo);
       const plannedOrderMemo = normal(planned?.plannedOrderMemo);
       const orderMemoTarget = normal(planned?.orderMemoTarget);
+      const orderMemoTargetInfo = orderMemoTargetForGridRow(task, row, index);
       if (match.failed) warnings.push(match.warning || 'item_key_match_failed');
+      if (task?.writeOrderMemo && !task.clear && orderMemoTargetInfo.warning) warnings.push(orderMemoTargetInfo.warning);
       if (shippingHoldNeedsReview(planned)) warnings.push('shipping_hold_unknown');
       if (keys.some(key => task.memo2ConflictMap?.has(key))) warnings.push('memo2_event_conflict');
       if (task.clear && memo2Target) warnings.push('completed_but_memo2_exists');
@@ -1292,7 +1383,9 @@
         'missing_current_source',
         'pre_inspection_order_memo_clear',
         'order_memo_clear_without_item_target',
-        'invoice_level_order_memo_clear'
+        'invoice_level_order_memo_clear',
+        'order_memo_target_missing',
+        'order_memo_target_ambiguous'
       ];
       if (hardBlock.some(type => list.has(type))) return 'N';
       if (list.has('order_memo_fallback_invoice_level') || list.has('memo1_conflict') || list.has('completed_then_reopened') || list.has('shipping_hold_unknown')) return 'REVIEW';
@@ -1418,6 +1511,8 @@
         memo2ConflictMap: new Set(),
         orderMemoMap: new Map(),
         orderMemoAmbiguousKeys: new Set(),
+        orderMemoNormalizedMap: new Map(),
+        orderMemoNormalizedAmbiguousKeys: new Set(),
         outboundConfirmedDateTargets: new Map(),
         outboundConfirmedDateAmbiguous: new Set(),
         partialHoldTargets: new Map(),
@@ -1502,7 +1597,7 @@
       const hasMemo2Clear = false;
       const allShortageItemsRepicked = false;
       const hasSystemMatch = hasShortageMatch || hasPickingMatch || hasOrderMatch || orderItemRows.length > 0;
-      const hasOrderMemoValue = hasSystemMatch && task.orderMemoMap.size > 0;
+      const hasOrderMemoValue = hasSystemMatch && orderItemRows.length > 0;
       const memo1HoldSignal = false;
       // A shortage table row can be absent even while another item still has an
       // active memo2 target (for example, a shortage reopened after repick).
@@ -2757,6 +2852,8 @@
       pre_inspection_order_memo_clear: '검품완료 전에 주문메모가 삭제될 가능성이 있음',
       order_memo_clear_without_item_target: '상품별 대상 없이 기존 주문메모를 삭제하려 함',
       invoice_level_order_memo_clear: '송장 전체 값을 근거로 상품별 주문메모를 삭제하려 함',
+      order_memo_target_missing: '주문메모 대상 상품행을 찾지 못함',
+      order_memo_target_ambiguous: '주문메모 대상 상품행이 둘 이상이라 확정할 수 없음',
       shipping_hold_unknown: '배송보류 변경 방향을 확정할 수 없음',
       order_memo_fallback_invoice_level: '상품별 주문메모 대신 송장 단위 값을 사용하려 함',
       memo1_conflict: '같은 주문의 관리메모1 값이 서로 충돌함',
