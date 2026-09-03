@@ -177,8 +177,10 @@
                     <button class="btn primary" data-dashboard-action="photo-library-search" type="button">검색</button>
                   </div>
                   <div id="dashboard-photo-library-status" class="dashboard-photo-library-status" aria-live="polite">사진 목록을 불러오는 중입니다.</div>
-                  <div id="dashboard-photo-library-grid" class="dashboard-photo-library-grid" aria-live="polite"></div>
-                  <button id="dashboard-photo-library-more" class="btn dashboard-photo-library-more" data-dashboard-action="photo-library-more" type="button" hidden>사진 더 불러오기</button>
+                  <div class="dashboard-photo-library-scroll">
+                    <div id="dashboard-photo-library-grid" class="dashboard-photo-library-grid" aria-live="polite"></div>
+                    <button id="dashboard-photo-library-more" class="btn dashboard-photo-library-more" data-dashboard-action="photo-library-more" type="button" hidden>사진 더 불러오기</button>
+                  </div>
                 </section>
               </div>
             </div>
