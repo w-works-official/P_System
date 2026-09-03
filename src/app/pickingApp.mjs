@@ -224,6 +224,7 @@ const state = {
     hasMore: true,
     search: "",
     type: "all",
+    mutatingName: "",
   },
   inventoryCountExportRunning: false,
 };
@@ -708,6 +709,109 @@ function visibleProductPhotoEntries() {
   });
 }
 
+function productPhotoLibraryEntryByName(name) {
+  return state.productPhotoLibrary.entries.find((entry) => entry.name === String(name || "")) || null;
+}
+
+function productPhotoRenameCode(value) {
+  const code = photoFileStem(value);
+  if (!code || /[\[\]]/.test(code) || code.endsWith(PRODUCT_PHOTO_GROUP_SUFFIX) || code.endsWith(PRODUCT_PHOTO_RANGE_SUFFIX)) return "";
+  return sellpiaSkuFromPhotoFileName(`${code}.jpg`) ? code : "";
+}
+
+function productPhotoRenameStorageCode(entry, code) {
+  if (entry?.type === "group") return productPhotoGroupCode(code);
+  if (entry?.type === "range") return productPhotoRangeCode(code);
+  return code;
+}
+
+async function loadProductPhotoBlob(storageCode) {
+  const sourceUrl = `${productImageUrlForCode(storageCode)}${productImageUrlForCode(storageCode).includes("?") ? "&" : "?"}copy=${Date.now()}`;
+  const response = await fetch(sourceUrl, { cache: "no-store" });
+  if (!response.ok) throw new Error(`원본 사진을 읽지 못했습니다. (${response.status})`);
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("원본 사진이 비어 있습니다.");
+  return blob;
+}
+
+async function verifyProductPhotoObject(storageCode) {
+  const checkUrl = `${productImageUrlForCode(storageCode)}${productImageUrlForCode(storageCode).includes("?") ? "&" : "?"}check=${Date.now()}`;
+  const response = await fetch(checkUrl, { cache: "no-store" });
+  if (!response.ok) throw new Error(`새 사진을 확인하지 못했습니다. (${response.status})`);
+}
+
+function setProductPhotoLibraryMutating(name = "") {
+  state.productPhotoLibrary.mutatingName = String(name || "");
+  renderProductPhotoLibrary();
+}
+
+async function renameProductPhotoLibraryEntry(entry) {
+  if (!entry || !allowWrites) {
+    toast("읽기전용입니다. URL에 write=1을 붙여 사진을 관리할 수 있습니다.");
+    return;
+  }
+  if (state.productPhotoLibrary.mutatingName) return;
+
+  const nextName = window.prompt(
+    `새 파일명을 입력하세요.\n현재 유형(${productPhotoTypeLabel(entry.type)})은 그대로 유지됩니다.\n묶음/범위 사진은 이 카드 한 장만 이동합니다.`,
+    `${entry.code}.jpg`,
+  );
+  if (nextName === null) return;
+  const nextCode = productPhotoRenameCode(nextName);
+  if (!nextCode) {
+    toast("파일명은 단일 SKU 형식으로 입력하세요. 예: 8601.jpg 또는 8601-2.jpg");
+    return;
+  }
+
+  const targetStorageCode = productPhotoRenameStorageCode(entry, nextCode);
+  if (targetStorageCode === entry.storageCode) {
+    toast("같은 파일명입니다.");
+    return;
+  }
+  const sourcePath = `${PRODUCT_PHOTO_FOLDER}/${entry.name}`;
+  const targetPath = `${PRODUCT_PHOTO_FOLDER}/${targetStorageCode}.jpg`;
+  setProductPhotoLibraryMutating(entry.name);
+  try {
+    const blob = await loadProductPhotoBlob(entry.storageCode);
+    const { error: uploadError } = await imageDb.storage.from(IMAGE_BUCKET).upload(targetPath, blob, {
+      contentType: "image/jpeg",
+      cacheControl: "0",
+      upsert: true,
+    });
+    if (uploadError) throw uploadError;
+    markProductPhotoUpdated(targetStorageCode);
+    await verifyProductPhotoObject(targetStorageCode);
+    const { error: removeError } = await imageDb.storage.from(IMAGE_BUCKET).remove([sourcePath]);
+    if (removeError) throw new Error(`새 이름으로 복사됐지만 기존 파일 삭제에 실패했습니다: ${removeError.message || removeError}`);
+    markProductPhotoUpdated(entry.storageCode);
+    toast(`${entry.code} → ${nextCode} 이름 변경 완료`);
+  } finally {
+    setProductPhotoLibraryMutating("");
+  }
+  await loadProductPhotoLibrary({ reset: true });
+}
+
+async function deleteProductPhotoLibraryEntry(entry) {
+  if (!entry || !allowWrites) {
+    toast("읽기전용입니다. URL에 write=1을 붙여 사진을 관리할 수 있습니다.");
+    return;
+  }
+  if (state.productPhotoLibrary.mutatingName) return;
+  const confirmed = window.confirm(`사진 파일을 삭제할까요?\n\n${entry.name}\n\n삭제하면 현재 ${productPhotoTypeLabel(entry.type)} 연결이 바로 해제됩니다.`);
+  if (!confirmed) return;
+
+  setProductPhotoLibraryMutating(entry.name);
+  try {
+    const { error } = await imageDb.storage.from(IMAGE_BUCKET).remove([`${PRODUCT_PHOTO_FOLDER}/${entry.name}`]);
+    if (error) throw error;
+    markProductPhotoUpdated(entry.storageCode);
+    toast(`${entry.code} 사진을 삭제했습니다.`);
+  } finally {
+    setProductPhotoLibraryMutating("");
+  }
+  await loadProductPhotoLibrary({ reset: true });
+}
+
 function renderProductPhotoLibrary() {
   if (!els.dashboardPhotoLibraryGrid || !els.dashboardPhotoLibraryStatus) return;
   const library = state.productPhotoLibrary;
@@ -734,6 +838,7 @@ function renderProductPhotoLibrary() {
       .map((entry) => {
         const imageUrl = productImageUrlForCode(entry.storageCode);
         const title = `${entry.code} · ${productPhotoTypeLabel(entry.type)}`;
+        const isMutating = library.mutatingName === entry.name;
         return `<article class="dashboard-photo-library-item">
           <button class="dashboard-photo-library-thumb" type="button" ${photoImgAttrs(imageUrl, title)} aria-label="${escapeHtml(title)} 사진 확대">
             <img src="${escapeHtml(imageUrl)}" ${photoImgAttrs(imageUrl, title)} alt="${escapeHtml(entry.code)}" loading="lazy">
@@ -743,6 +848,10 @@ function renderProductPhotoLibrary() {
             <strong title="${escapeHtml(entry.code)}">${escapeHtml(entry.code)}</strong>
             <span title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span>
             <span>${escapeHtml(productPhotoDateLabel(entry.updatedAt))} · ${escapeHtml(productPhotoSizeLabel(entry.bytes))}</span>
+            <div class="dashboard-photo-library-actions">
+              <button class="btn" data-photo-library-action="rename" data-photo-library-name="${escapeHtml(entry.name)}" type="button" ${isMutating ? "disabled" : ""}>${isMutating ? "처리 중..." : "이름 변경"}</button>
+              <button class="btn danger" data-photo-library-action="delete" data-photo-library-name="${escapeHtml(entry.name)}" type="button" ${isMutating ? "disabled" : ""}>삭제</button>
+            </div>
           </div>
         </article>`;
       })
@@ -9357,6 +9466,16 @@ function bindEvents() {
     setActiveTab(button.dataset.dashboardTab);
   });
   els.dashboardPanel?.addEventListener("click", (event) => {
+    const photoLibraryAction = event.target.closest("[data-photo-library-action]");
+    if (photoLibraryAction) {
+      const entry = productPhotoLibraryEntryByName(photoLibraryAction.dataset.photoLibraryName || "");
+      if (photoLibraryAction.dataset.photoLibraryAction === "rename") {
+        renameProductPhotoLibraryEntry(entry).catch(showError);
+      } else if (photoLibraryAction.dataset.photoLibraryAction === "delete") {
+        deleteProductPhotoLibraryEntry(entry).catch(showError);
+      }
+      return;
+    }
     const button = event.target.closest("[data-dashboard-action]");
     if (!button) return;
     if (button.dataset.dashboardAction === "reorder-invoices") {

@@ -1044,6 +1044,26 @@ input {
 .dashboard-photo-library-type.range { background: #fff7ed; color: #c2410c; }
 .dashboard-photo-library-type.common { background: #ecfdf5; color: #047857; }
 
+.dashboard-photo-library-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.dashboard-photo-library-actions .btn {
+  min-width: 0;
+  min-height: 29px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+
+.dashboard-photo-library-actions .danger {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #be123c;
+}
+
 .dashboard-photo-library-more {
   display: block;
   min-width: 180px;
