@@ -26,6 +26,8 @@ const IMAGE_SUPABASE_URL = "https://bpgvqmtsjgegnrdzmpep.supabase.co";
 const IMAGE_SUPABASE_KEY = "sb_publishable__NVp6Ra227_e1TQqQE40oA_O2PVwv5C";
 const IMAGE_BUCKET = "product-images";
 const PRODUCT_PHOTO_FOLDER = "sellpia";
+const PRODUCT_PHOTO_GROUP_SUFFIX = ".__group";
+const PRODUCT_PHOTO_RANGE_SUFFIX = ".__range";
 const PRODUCT_PHOTO_MAX_DIMENSION = 2400;
 const PRODUCT_PHOTO_MAX_BYTES = 5 * 1024 * 1024;
 const RECEIVING_LABEL_BUCKET = "system-v3-shared";
@@ -399,19 +401,90 @@ function markProductPhotoUpdated(code) {
   return version;
 }
 
-function productImageUrl(sellpiaProductCode) {
-  const code = String(sellpiaProductCode || "").trim();
-  if (!code) return "";
-  const base = `${IMAGE_SUPABASE_URL}/storage/v1/object/public/${IMAGE_BUCKET}/${PRODUCT_PHOTO_FOLDER}/${encodeURIComponent(code)}.jpg`;
-  const version = productPhotoVersion(code);
+function productImageUrlForCode(code) {
+  const normalizedCode = String(code || "").trim();
+  if (!normalizedCode) return "";
+  const base = `${IMAGE_SUPABASE_URL}/storage/v1/object/public/${IMAGE_BUCKET}/${PRODUCT_PHOTO_FOLDER}/${encodeURIComponent(normalizedCode)}.jpg`;
+  const version = productPhotoVersion(normalizedCode);
   return version ? `${base}?v=${encodeURIComponent(version)}` : base;
 }
 
-function sellpiaSkuFromPhotoFileName(fileName) {
+function productImageUrl(sellpiaProductCode) {
+  return productImageUrlForCode(sellpiaProductCode);
+}
+
+function productPhotoRangeCode(code) {
+  const normalizedCode = String(code || "").trim();
+  return normalizedCode ? `${normalizedCode}${PRODUCT_PHOTO_RANGE_SUFFIX}` : "";
+}
+
+function productPhotoGroupCode(code) {
+  const normalizedCode = String(code || "").trim();
+  return normalizedCode ? `${normalizedCode}${PRODUCT_PHOTO_GROUP_SUFFIX}` : "";
+}
+
+function productImageFallbackUrls(sellpiaProductCode) {
+  const code = String(sellpiaProductCode || "").trim();
+  const match = code.match(/^(.+)-(\d+)$/);
+  if (!match?.[1]) return [];
+  return [
+    productImageUrlForCode(productPhotoGroupCode(code)),
+    productImageUrlForCode(productPhotoRangeCode(code)),
+    productImageUrlForCode(match[1]),
+  ];
+}
+
+function photoFileStem(fileName) {
   const name = String(fileName || "").trim();
-  const sku = name.replace(/\.[^.]+$/, "").trim();
-  if (!sku || sku === "." || sku === ".." || sku.length > 160 || /[\\/]/.test(sku)) return "";
-  return sku;
+  const stem = name.replace(/\.[^.]+$/, "").trim();
+  if (!stem || stem === "." || stem === ".." || stem.length > 160 || /[\\/]/.test(stem)) return "";
+  return stem;
+}
+
+function sellpiaSkuTargetsFromPhotoFileName(fileName) {
+  const stem = photoFileStem(fileName);
+  if (!stem) return [];
+  const grouped = /^(.*)-((?:\[[^\]]+\])+)$/.exec(stem);
+  if (!grouped) return [stem];
+
+  const prefix = String(grouped[1] || "").trim();
+  const bracketSource = grouped[2] || "";
+  if (!prefix || prefix.length > 150 || /[\\/]/.test(prefix)) return [];
+  const parts = [...bracketSource.matchAll(/\[([^\]]+)\]/g)].map((match) => String(match[1] || "").trim());
+  if (!parts.length || parts.map((part) => `[${part}]`).join("") !== bracketSource) return [];
+
+  const suffixes = new Set();
+  for (const part of parts) {
+    const range = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start || end - start >= 200) return [];
+      for (let value = start; value <= end; value += 1) suffixes.add(value);
+      continue;
+    }
+    if (!/^\d+$/.test(part)) return [];
+    const value = Number(part);
+    if (!Number.isSafeInteger(value) || value < 1) return [];
+    suffixes.add(value);
+  }
+  return [...suffixes].sort((a, b) => a - b).map((suffix) => `${prefix}-${suffix}`);
+}
+
+function photoFileTargetTier(fileName) {
+  const stem = photoFileStem(fileName);
+  const grouped = stem && /^(.*)-((?:\[[^\]]+\])+)$/.exec(stem);
+  if (!grouped) return "direct";
+  const parts = [...grouped[2].matchAll(/\[([^\]]+)\]/g)].map((match) => String(match[1] || "").trim());
+  if (!parts.length) return "";
+  if (parts.every((part) => /^\d+$/.test(part))) return "group";
+  if (parts.every((part) => /^\d+\s*-\s*\d+$/.test(part))) return "range";
+  return "";
+}
+
+function sellpiaSkuFromPhotoFileName(fileName) {
+  const targets = sellpiaSkuTargetsFromPhotoFileName(fileName);
+  return targets.length === 1 ? targets[0] : "";
 }
 
 function productPhotoFileAllowed(file) {
@@ -515,10 +588,11 @@ async function uploadProductPhotos(fileList) {
   try {
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
-      const sku = sellpiaSkuFromPhotoFileName(file.name);
-      renderProductPhotoUploadStatus({ message: `사진 저장 중 ${index + 1}/${files.length}: ${sku || file.name}` });
-      if (!sku) {
-        failures.push(`${file.name}: 파일명에서 셀피아 SKU를 확인할 수 없음`);
+      const targetSkus = sellpiaSkuTargetsFromPhotoFileName(file.name);
+      const targetTier = photoFileTargetTier(file.name);
+      renderProductPhotoUploadStatus({ message: `사진 저장 중 ${index + 1}/${files.length}: ${targetSkus.join(", ") || file.name}` });
+      if (!targetSkus.length || !targetTier) {
+        failures.push(`${file.name}: 파일명 형식을 확인할 수 없음 (예: 8601.jpg, 8601-2.jpg, 8601-[1][3].jpg, 8601-[1-10].jpg)`);
         continue;
       }
       if (!productPhotoFileAllowed(file)) {
@@ -528,15 +602,21 @@ async function uploadProductPhotos(fileList) {
 
       try {
         const jpeg = await normalizeProductPhotoToJpeg(file);
-        const objectPath = `${PRODUCT_PHOTO_FOLDER}/${sku}.jpg`;
-        const { error } = await imageDb.storage.from(IMAGE_BUCKET).upload(objectPath, jpeg, {
-          contentType: "image/jpeg",
-          cacheControl: "0",
-          upsert: true,
-        });
-        if (error) throw error;
-        markProductPhotoUpdated(sku);
-        successes.push(sku);
+        for (const sku of targetSkus) {
+          const storageSku = targetTier === "group" ? productPhotoGroupCode(sku) : targetTier === "range" ? productPhotoRangeCode(sku) : sku;
+          const objectPath = `${PRODUCT_PHOTO_FOLDER}/${storageSku}.jpg`;
+          const { error } = await imageDb.storage.from(IMAGE_BUCKET).upload(objectPath, jpeg, {
+            contentType: "image/jpeg",
+            cacheControl: "0",
+            upsert: true,
+          });
+          if (error) {
+            failures.push(`${file.name} → ${sku}: ${error.message || error}`);
+            continue;
+          }
+          markProductPhotoUpdated(storageSku);
+          successes.push(sku);
+        }
       } catch (error) {
         failures.push(`${file.name}: ${error?.message || error}`);
       }
@@ -561,8 +641,10 @@ function photoTitleForItem(item = {}) {
   return [item.ownCode, cleanOptionName(item.optionName, item.ownCode) || item.productName].filter(Boolean).join(" · ");
 }
 
-function photoImgAttrs(src, title = "") {
-  return `data-photo-src="${escapeHtml(src)}" data-photo-title="${escapeHtml(title)}"`;
+function photoImgAttrs(src, title = "", fallbackSrcs = []) {
+  const fallbacks = [...new Set((Array.isArray(fallbackSrcs) ? fallbackSrcs : [fallbackSrcs]).map((value) => String(value || "").trim()).filter(Boolean))];
+  const fallbackAttr = fallbacks.length ? ` data-photo-fallbacks="${escapeHtml(JSON.stringify(fallbacks))}"` : "";
+  return `data-photo-src="${escapeHtml(src)}" data-photo-title="${escapeHtml(title)}"${fallbackAttr} onerror="var f=JSON.parse(this.dataset.photoFallbacks||'[]');if(f.length){var n=f.shift();this.dataset.photoFallbacks=JSON.stringify(f);this.src=n;this.dataset.photoSrc=n;}else{this.style.visibility='hidden'}"`;
 }
 
 function ensurePhotoViewer() {
@@ -2534,7 +2616,7 @@ function renderGoldInvoiceItem(invoice, item, invoiceIndex = 0, itemIndex = 0) {
     .join(" ");
   return `<div class="${classes}" data-order-group="${escapeHtml(invoice.orderGroupNo)}" data-item-no="${escapeHtml(item.sellpiaItemNo)}" data-slot-key="${escapeHtml(key)}">
     <button class="pick-check ${checked ? "checked" : ""}" data-action="toggle" data-order-group="${escapeHtml(invoice.orderGroupNo)}" data-item-no="${escapeHtml(item.sellpiaItemNo)}" ${itemIsEffectivelyCancelled(invoice, item) ? "disabled" : ""}>${checked ? "✓" : ""}</button>
-    <div class="gold-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item))} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : "사진"}</div>
+    <div class="gold-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item), productImageFallbackUrls(item.sellpiaProductCode))} alt="" loading="lazy">` : "사진"}</div>
     <div class="gold-item-main">
       <span class="workflow-row-order">상품순서 ${itemOrderNo(item, itemIndex)}번</span>
       <strong class="${optionClass(item, "option")}">${escapeHtml(option)}</strong>
@@ -2986,7 +3068,7 @@ function renderShortageInvoiceItems(invoice) {
         const completeDisabled = allowWorkflowEvents ? "" : "disabled";
         return `<div class="workflow-item-row ${shortage > 0 ? "repicked" : ""} ${itemCancelled ? "is-cancelled" : ""}">
           <span>${itemSequenceNo(item, index)}</span>
-          <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item))} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : "?ъ쭊"}</div>
+          <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item), productImageFallbackUrls(item.sellpiaProductCode))} alt="" loading="lazy">` : "?ъ쭊"}</div>
           <strong>${escapeHtml(item.ownCode || "-")}</strong>
           <em class="${optionHasBarChange(item) ? "option-change" : ""}">${escapeHtml(cleanOptionName(item.optionName, item.ownCode) || item.productName || "-")}</em>
           <b>${Number(item.quantity) || 1}개</b>
@@ -3087,7 +3169,7 @@ function renderShortagePanels() {
       </div>
     </div>
     <div class="workflow-detail-main">
-      <div class="workflow-photo">${productImageUrl(selected.item.sellpiaProductCode) ? `<img src="${productImageUrl(selected.item.sellpiaProductCode)}" ${photoImgAttrs(productImageUrl(selected.item.sellpiaProductCode), photoTitleForItem(selected.item))} alt="">` : "사진"}</div>
+      <div class="workflow-photo">${productImageUrl(selected.item.sellpiaProductCode) ? `<img src="${productImageUrl(selected.item.sellpiaProductCode)}" ${photoImgAttrs(productImageUrl(selected.item.sellpiaProductCode), photoTitleForItem(selected.item), productImageFallbackUrls(selected.item.sellpiaProductCode))} alt="">` : "사진"}</div>
       <div class="workflow-detail-text">
         <h3 class="${optionHasBarChange(selected.item) ? "option-change" : ""}">${escapeHtml(cleanOptionName(selected.item.optionName, selected.item.ownCode) || selected.item.productName || "-")}</h3>
         <p>${escapeHtml(selected.item.productName || "")}</p>
@@ -3372,7 +3454,7 @@ function renderInspectionPanels(options = {}) {
           return `<div class="workflow-item-row ${rowClass}" data-inspection-item-key="${escapeHtml(itemKey)}">
             <span class="workflow-seq-cell">${itemSequenceNo(item, index)}</span>
             ${selectedLabelTarget ? `<span class="workflow-label-cell">${escapeHtml(labelNo)}</span>` : ""}
-            <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item))} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : "사진"}</div>
+            <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item), productImageFallbackUrls(item.sellpiaProductCode))} alt="" loading="lazy">` : "사진"}</div>
             <em class="${optionClass(item, "workflow-option-cell")}">${shipmentMemberBadge(item)}${escapeHtml(option)}</em>
             <b>${Number(item.quantity) || 1}</b>
             <strong class="workflow-product-cell">${escapeHtml(product)}</strong>
@@ -3839,7 +3921,7 @@ function renderLegacyCsInvoicePanels() {
           const sellpiaOrderMemo = itemSellpiaOrderMemo(invoice, item);
           return `<div class="workflow-item-row">
             <span class="workflow-seq-cell">${itemSequenceNo(item, index)}</span>
-            <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item))} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : "사진"}</div>
+            <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item), productImageFallbackUrls(item.sellpiaProductCode))} alt="" loading="lazy">` : "사진"}</div>
             <em class="${optionClass(item, "workflow-option-cell")}">${escapeHtml(option)}</em>
             <b>${Number(item.quantity) || 1}</b>
             <strong class="workflow-product-cell">${escapeHtml(product)}</strong>
@@ -3943,7 +4025,7 @@ function renderCompletedPanels() {
           const imageUrl = productImageUrl(item.sellpiaProductCode);
           return `<div class="workflow-item-row ${rowClass}">
             <span>${index + 1}</span>
-            <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item))} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : "사진"}</div>
+            <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item), productImageFallbackUrls(item.sellpiaProductCode))} alt="" loading="lazy">` : "사진"}</div>
             <strong>${escapeHtml(item.ownCode || "-")}</strong>
             <em class="${optionHasBarChange(item) ? "option-change" : ""}">${escapeHtml(cleanOptionName(item.optionName, item.ownCode) || item.productName || "-")}</em>
             <b>${Number(item.quantity) || 1}개</b>
@@ -3981,7 +4063,7 @@ function renderPickingRow(invoice, item, invoiceIndex = 0, itemIndex = 0) {
   return `<article class="${classes}" data-order-group="${escapeHtml(invoice.orderGroupNo)}" data-item-no="${escapeHtml(item.sellpiaItemNo)}" data-slot-key="${escapeHtml(slotKey)}">
     <div class="thumb-wrap">
       <button class="pick-check ${checked ? "checked" : ""}" data-action="toggle" data-order-group="${escapeHtml(invoice.orderGroupNo)}" data-item-no="${escapeHtml(item.sellpiaItemNo)}" ${itemIsEffectivelyCancelled(invoice, item) ? "disabled" : ""}>${checked ? "✓" : ""}</button>
-      ${imageUrl ? `<img class="thumb" src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item))} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : '<div class="thumb"></div>'}
+      ${imageUrl ? `<img class="thumb" src="${imageUrl}" ${photoImgAttrs(imageUrl, photoTitleForItem(item), productImageFallbackUrls(item.sellpiaProductCode))} alt="" loading="lazy">` : '<div class="thumb"></div>'}
     </div>
     <div class="picking-body">
       <div class="picking-main">
@@ -4652,7 +4734,7 @@ function renderCsCaseItemEditor(row, itemNumber = 0) {
   return `<article class="cs-item-card ${caseRow?.status === "pending" ? "is-cs-target" : ""} ${partialShippingHoldOn ? "has-partial-hold" : ""} ${cancellation.cancelled ? "is-cancelled" : ""}" data-cs-row-key="${escapeHtml(row.key)}">
     <section class="cs-item-overview">
       <span class="cs-item-line-number" title="상품행번호 ${escapeHtml(String(itemNumber || "-"))}">${escapeHtml(String(itemNumber || "-"))}</span>
-      <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, `${row.ownCode || ""} · ${item.p_name || ""}`)} alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : "사진"}</div>
+      <div class="workflow-item-photo">${imageUrl ? `<img src="${imageUrl}" ${photoImgAttrs(imageUrl, `${row.ownCode || ""} · ${item.p_name || ""}`, productImageFallbackUrls(imageCode))} alt="" loading="lazy">` : "사진"}</div>
       <div class="cs-item-product"><strong>${escapeHtml(item.p_name || "상품 정보 없음")}</strong><em>${escapeHtml(item.p_option || "옵션 없음")}</em><div class="cs-item-facts"><span>수량 <b>${escapeHtml(String(item.qty ?? item.o_amount ?? "-"))}</b></span><span>자사코드 <b>${escapeHtml(row.ownCode || "-")}</b></span></div></div>
       <div class="workflow-row-badges cs-item-status">${caseBadge}${partialHoldBadge}${row.isGold ? '<span class="workflow-row-badge gold">14K</span>' : '<span class="workflow-row-badge">일반</span>'}</div>
     </section>
