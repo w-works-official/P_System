@@ -28,6 +28,7 @@ const IMAGE_BUCKET = "product-images";
 const PRODUCT_PHOTO_FOLDER = "sellpia";
 const PRODUCT_PHOTO_GROUP_SUFFIX = ".__group";
 const PRODUCT_PHOTO_RANGE_SUFFIX = ".__range";
+const PRODUCT_PHOTO_PRIORITY_SUFFIX = ".__priority";
 const PRODUCT_PHOTO_MAX_DIMENSION = 2400;
 const PRODUCT_PHOTO_MAX_BYTES = 5 * 1024 * 1024;
 const PHOTO_VIEWER_ZOOM_STORAGE_KEY = "system-v3-photo-viewer-zoom";
@@ -432,7 +433,7 @@ function productImageUrlForCode(code) {
 }
 
 function productImageUrl(sellpiaProductCode) {
-  return productImageUrlForCode(sellpiaProductCode);
+  return productImageUrlForCode(productPhotoPriorityCode(sellpiaProductCode));
 }
 
 function productPhotoRangeCode(code) {
@@ -445,11 +446,30 @@ function productPhotoGroupCode(code) {
   return normalizedCode ? `${normalizedCode}${PRODUCT_PHOTO_GROUP_SUFFIX}` : "";
 }
 
+function productPhotoPriorityCode(code) {
+  const normalizedCode = String(code || "").trim();
+  return normalizedCode ? `${normalizedCode}${PRODUCT_PHOTO_PRIORITY_SUFFIX}` : "";
+}
+
+function productPhotoStorageCode(code, tier = "direct", priority = false) {
+  const baseCode = tier === "group"
+    ? productPhotoGroupCode(code)
+    : tier === "range"
+      ? productPhotoRangeCode(code)
+      : String(code || "").trim();
+  return priority ? productPhotoPriorityCode(baseCode) : baseCode;
+}
+
 function productImageFallbackUrls(sellpiaProductCode) {
   const code = String(sellpiaProductCode || "").trim();
   const match = code.match(/^(.+)-(\d+)$/);
-  if (!match?.[1]) return [];
+  if (!code) return [];
+  if (!match?.[1]) return [productImageUrlForCode(code)];
   return [
+    productImageUrlForCode(productPhotoPriorityCode(productPhotoGroupCode(code))),
+    productImageUrlForCode(productPhotoPriorityCode(productPhotoRangeCode(code))),
+    productImageUrlForCode(productPhotoPriorityCode(match[1])),
+    productImageUrlForCode(code),
     productImageUrlForCode(productPhotoGroupCode(code)),
     productImageUrlForCode(productPhotoRangeCode(code)),
     productImageUrlForCode(match[1]),
@@ -463,8 +483,17 @@ function photoFileStem(fileName) {
   return stem;
 }
 
+function photoFileRule(fileName) {
+  const rawStem = photoFileStem(fileName);
+  const priorityMatch = rawStem.match(/^\{(.+)\}$/);
+  if (!priorityMatch) return { stem: rawStem, priority: false };
+  const stem = String(priorityMatch[1] || "").trim();
+  if (!stem || stem.length > 160 || /[\\/{}]/.test(stem)) return { stem: "", priority: true };
+  return { stem, priority: true };
+}
+
 function sellpiaSkuTargetsFromPhotoFileName(fileName) {
-  const stem = photoFileStem(fileName);
+  const { stem } = photoFileRule(fileName);
   if (!stem) return [];
   const grouped = /^(.*)-((?:\[[^\]]+\])+)$/.exec(stem);
   if (!grouped) return [stem];
@@ -494,7 +523,7 @@ function sellpiaSkuTargetsFromPhotoFileName(fileName) {
 }
 
 function photoFileTargetTier(fileName) {
-  const stem = photoFileStem(fileName);
+  const { stem } = photoFileRule(fileName);
   const grouped = stem && /^(.*)-((?:\[[^\]]+\])+)$/.exec(stem);
   if (!grouped) return "direct";
   const parts = [...grouped[2].matchAll(/\[([^\]]+)\]/g)].map((match) => String(match[1] || "").trim());
@@ -502,6 +531,10 @@ function photoFileTargetTier(fileName) {
   if (parts.every((part) => /^\d+$/.test(part))) return "group";
   if (parts.every((part) => /^\d+\s*-\s*\d+$/.test(part))) return "range";
   return "";
+}
+
+function photoFileHasPriority(fileName) {
+  return photoFileRule(fileName).priority && Boolean(photoFileRule(fileName).stem);
 }
 
 function sellpiaSkuFromPhotoFileName(fileName) {
@@ -612,9 +645,10 @@ async function uploadProductPhotos(fileList) {
       const file = files[index];
       const targetSkus = sellpiaSkuTargetsFromPhotoFileName(file.name);
       const targetTier = photoFileTargetTier(file.name);
+      const priority = photoFileHasPriority(file.name);
       renderProductPhotoUploadStatus({ message: `사진 저장 중 ${index + 1}/${files.length}: ${targetSkus.join(", ") || file.name}` });
       if (!targetSkus.length || !targetTier) {
-        failures.push(`${file.name}: 파일명 형식을 확인할 수 없음 (예: 8601.jpg, 8601-2.jpg, 8601-[1][3].jpg, 8601-[1-10].jpg)`);
+        failures.push(`${file.name}: 파일명 형식을 확인할 수 없음 (예: 8601.jpg, 8601-2.jpg, 8601-[1][3].jpg, 8601-[1-10].jpg, {8601}.jpg)`);
         continue;
       }
       if (!productPhotoFileAllowed(file)) {
@@ -625,7 +659,7 @@ async function uploadProductPhotos(fileList) {
       try {
         const jpeg = await normalizeProductPhotoToJpeg(file);
         for (const sku of targetSkus) {
-          const storageSku = targetTier === "group" ? productPhotoGroupCode(sku) : targetTier === "range" ? productPhotoRangeCode(sku) : sku;
+          const storageSku = productPhotoStorageCode(sku, targetTier, priority);
           const objectPath = `${PRODUCT_PHOTO_FOLDER}/${storageSku}.jpg`;
           const { error } = await imageDb.storage.from(IMAGE_BUCKET).upload(objectPath, jpeg, {
             contentType: "image/jpeg",
@@ -666,15 +700,17 @@ function productPhotoLibraryEntry(file = {}) {
   const storageCode = name.replace(/\.jpg$/i, "");
   if (!storageCode || /[\\/]/.test(storageCode)) return null;
 
+  const priority = storageCode.endsWith(PRODUCT_PHOTO_PRIORITY_SUFFIX);
+  const tierStorageCode = priority ? storageCode.slice(0, -PRODUCT_PHOTO_PRIORITY_SUFFIX.length) : storageCode;
   let type = "direct";
-  let code = storageCode;
-  if (storageCode.endsWith(PRODUCT_PHOTO_GROUP_SUFFIX)) {
+  let code = tierStorageCode;
+  if (tierStorageCode.endsWith(PRODUCT_PHOTO_GROUP_SUFFIX)) {
     type = "group";
-    code = storageCode.slice(0, -PRODUCT_PHOTO_GROUP_SUFFIX.length);
-  } else if (storageCode.endsWith(PRODUCT_PHOTO_RANGE_SUFFIX)) {
+    code = tierStorageCode.slice(0, -PRODUCT_PHOTO_GROUP_SUFFIX.length);
+  } else if (tierStorageCode.endsWith(PRODUCT_PHOTO_RANGE_SUFFIX)) {
     type = "range";
-    code = storageCode.slice(0, -PRODUCT_PHOTO_RANGE_SUFFIX.length);
-  } else if (!/^.+-\d+$/.test(storageCode)) {
+    code = tierStorageCode.slice(0, -PRODUCT_PHOTO_RANGE_SUFFIX.length);
+  } else if (!/^.+-\d+$/.test(tierStorageCode)) {
     type = "common";
   }
   if (!code) return null;
@@ -684,13 +720,15 @@ function productPhotoLibraryEntry(file = {}) {
     storageCode,
     code,
     type,
+    priority,
     updatedAt: String(file.updated_at || file.created_at || ""),
     bytes: Number(file.metadata?.size || 0),
   };
 }
 
-function productPhotoTypeLabel(type) {
-  return ({ direct: "전용 파일", group: "개별번호 묶음", range: "범위 사진", common: "공용 prefix" })[type] || "사진";
+function productPhotoTypeLabel(type, priority = false) {
+  const label = ({ direct: "전용 파일", group: "개별번호 묶음", range: "범위 사진", common: "공용 prefix" })[type] || "사진";
+  return priority ? `우선 적용 · ${label}` : label;
 }
 
 function productPhotoSizeLabel(bytes) {
@@ -726,9 +764,7 @@ function productPhotoRenameCode(value) {
 }
 
 function productPhotoRenameStorageCode(entry, code) {
-  if (entry?.type === "group") return productPhotoGroupCode(code);
-  if (entry?.type === "range") return productPhotoRangeCode(code);
-  return code;
+  return productPhotoStorageCode(code, entry?.type || "direct", Boolean(entry?.priority));
 }
 
 async function loadProductPhotoBlob(storageCode) {
@@ -759,7 +795,7 @@ async function renameProductPhotoLibraryEntry(entry) {
   if (state.productPhotoLibrary.mutatingName) return;
 
   const nextName = window.prompt(
-    `이 사진을 연결할 새 SKU 파일명을 입력하세요.\n\n현재 연결: ${entry.code}.jpg\n입력 예: 8601.jpg 또는 8601-2.jpg\n\n※ 묶음/범위 사진은 지금 선택한 사진 한 장만 변경됩니다.`,
+    `이 사진 한 장을 새 SKU에 연결합니다.\n\n현재 연결: ${entry.code}.jpg\n입력 예: 8601.jpg 또는 8601-2.jpg\n\n새 이름으로 저장한 뒤 기존 파일은 삭제됩니다.\n즉, 정상 완료되면 사진이 두 장 남지 않습니다.${entry.priority ? "\n\n※ 현재 우선 적용 설정은 그대로 유지됩니다." : ""}`,
     `${entry.code}.jpg`,
   );
   if (nextName === null) return;
@@ -803,7 +839,7 @@ async function deleteProductPhotoLibraryEntry(entry) {
     return;
   }
   if (state.productPhotoLibrary.mutatingName) return;
-  const confirmed = window.confirm(`사진 파일을 삭제할까요?\n\n${entry.name}\n\n삭제하면 현재 ${productPhotoTypeLabel(entry.type)} 연결이 바로 해제됩니다.`);
+  const confirmed = window.confirm(`사진 파일을 삭제할까요?\n\n${entry.name}\n\n삭제하면 이 사진은 라이브러리와 상품 연결에서 바로 제거됩니다.\n삭제 후에는 사진 파일이 남아 있지 않습니다.`);
   if (!confirmed) return;
 
   setProductPhotoLibraryMutating(entry.name);
@@ -894,14 +930,14 @@ function renderProductPhotoLibrary() {
     els.dashboardPhotoLibraryGrid.innerHTML = entries
       .map((entry) => {
         const imageUrl = productImageUrlForCode(entry.storageCode);
-        const title = `${entry.code} · ${productPhotoTypeLabel(entry.type)}`;
+        const title = `${entry.code} · ${productPhotoTypeLabel(entry.type, entry.priority)}`;
         const isMutating = library.mutatingName === entry.name;
         return `<article class="dashboard-photo-library-item${isMutating ? " is-mutating" : ""}" data-photo-library-entry="${escapeHtml(entry.name)}" title="우클릭: 이름 변경 또는 삭제">
           <button class="dashboard-photo-library-thumb" type="button" ${photoImgAttrs(imageUrl, title)} aria-label="${escapeHtml(title)} 사진 확대">
             <img src="${escapeHtml(imageUrl)}" ${photoImgAttrs(imageUrl, title)} alt="${escapeHtml(entry.code)}" loading="lazy">
           </button>
           <div class="dashboard-photo-library-body">
-            <span class="dashboard-photo-library-type ${escapeHtml(entry.type)}">${escapeHtml(productPhotoTypeLabel(entry.type))}</span>
+            <span class="dashboard-photo-library-type ${escapeHtml(entry.type)}">${escapeHtml(productPhotoTypeLabel(entry.type, entry.priority))}</span>
             <strong title="${escapeHtml(entry.code)}">${escapeHtml(entry.code)}</strong>
             <span title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span>
             <span>${isMutating ? "사진 처리 중..." : `${escapeHtml(productPhotoDateLabel(entry.updatedAt))} · ${escapeHtml(productPhotoSizeLabel(entry.bytes))}`}</span>
