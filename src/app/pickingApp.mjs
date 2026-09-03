@@ -225,6 +225,7 @@ const state = {
     search: "",
     type: "all",
     mutatingName: "",
+    contextMenuName: "",
   },
   inventoryCountExportRunning: false,
 };
@@ -812,6 +813,44 @@ async function deleteProductPhotoLibraryEntry(entry) {
   await loadProductPhotoLibrary({ reset: true });
 }
 
+function ensureProductPhotoLibraryContextMenu() {
+  let menu = document.getElementById("photo-library-context-menu");
+  if (menu) return menu;
+  menu = document.createElement("div");
+  menu.id = "photo-library-context-menu";
+  menu.className = "photo-library-context-menu";
+  menu.hidden = true;
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "사진 관리 메뉴");
+  menu.innerHTML = `
+    <button type="button" role="menuitem" data-photo-library-context-action="rename">이름 변경</button>
+    <button type="button" role="menuitem" class="danger" data-photo-library-context-action="delete">삭제</button>
+  `;
+  document.body.append(menu);
+  return menu;
+}
+
+function closeProductPhotoLibraryContextMenu() {
+  const menu = document.getElementById("photo-library-context-menu");
+  if (menu) menu.hidden = true;
+  state.productPhotoLibrary.contextMenuName = "";
+}
+
+function openProductPhotoLibraryContextMenu(entry, clientX, clientY) {
+  if (!entry || state.productPhotoLibrary.mutatingName) return;
+  const menu = ensureProductPhotoLibraryContextMenu();
+  state.productPhotoLibrary.contextMenuName = entry.name;
+  menu.hidden = false;
+  menu.style.visibility = "hidden";
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const left = Math.max(8, Math.min(clientX, window.innerWidth - menu.offsetWidth - 8));
+  const top = Math.max(8, Math.min(clientY, window.innerHeight - menu.offsetHeight - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = "";
+}
+
 function renderProductPhotoLibrary() {
   if (!els.dashboardPhotoLibraryGrid || !els.dashboardPhotoLibraryStatus) return;
   const library = state.productPhotoLibrary;
@@ -839,7 +878,7 @@ function renderProductPhotoLibrary() {
         const imageUrl = productImageUrlForCode(entry.storageCode);
         const title = `${entry.code} · ${productPhotoTypeLabel(entry.type)}`;
         const isMutating = library.mutatingName === entry.name;
-        return `<article class="dashboard-photo-library-item">
+        return `<article class="dashboard-photo-library-item${isMutating ? " is-mutating" : ""}" data-photo-library-entry="${escapeHtml(entry.name)}" title="우클릭: 이름 변경 또는 삭제">
           <button class="dashboard-photo-library-thumb" type="button" ${photoImgAttrs(imageUrl, title)} aria-label="${escapeHtml(title)} 사진 확대">
             <img src="${escapeHtml(imageUrl)}" ${photoImgAttrs(imageUrl, title)} alt="${escapeHtml(entry.code)}" loading="lazy">
           </button>
@@ -847,11 +886,7 @@ function renderProductPhotoLibrary() {
             <span class="dashboard-photo-library-type ${escapeHtml(entry.type)}">${escapeHtml(productPhotoTypeLabel(entry.type))}</span>
             <strong title="${escapeHtml(entry.code)}">${escapeHtml(entry.code)}</strong>
             <span title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span>
-            <span>${escapeHtml(productPhotoDateLabel(entry.updatedAt))} · ${escapeHtml(productPhotoSizeLabel(entry.bytes))}</span>
-            <div class="dashboard-photo-library-actions">
-              <button class="btn" data-photo-library-action="rename" data-photo-library-name="${escapeHtml(entry.name)}" type="button" ${isMutating ? "disabled" : ""}>${isMutating ? "처리 중..." : "이름 변경"}</button>
-              <button class="btn danger" data-photo-library-action="delete" data-photo-library-name="${escapeHtml(entry.name)}" type="button" ${isMutating ? "disabled" : ""}>삭제</button>
-            </div>
+            <span>${isMutating ? "사진 처리 중..." : `${escapeHtml(productPhotoDateLabel(entry.updatedAt))} · ${escapeHtml(productPhotoSizeLabel(entry.bytes))}`}</span>
           </div>
         </article>`;
       })
@@ -9466,16 +9501,6 @@ function bindEvents() {
     setActiveTab(button.dataset.dashboardTab);
   });
   els.dashboardPanel?.addEventListener("click", (event) => {
-    const photoLibraryAction = event.target.closest("[data-photo-library-action]");
-    if (photoLibraryAction) {
-      const entry = productPhotoLibraryEntryByName(photoLibraryAction.dataset.photoLibraryName || "");
-      if (photoLibraryAction.dataset.photoLibraryAction === "rename") {
-        renameProductPhotoLibraryEntry(entry).catch(showError);
-      } else if (photoLibraryAction.dataset.photoLibraryAction === "delete") {
-        deleteProductPhotoLibraryEntry(entry).catch(showError);
-      }
-      return;
-    }
     const button = event.target.closest("[data-dashboard-action]");
     if (!button) return;
     if (button.dataset.dashboardAction === "reorder-invoices") {
@@ -9526,6 +9551,29 @@ function bindEvents() {
     state.productPhotoLibrary.type = String(els.dashboardPhotoFilter.value || "all");
     renderProductPhotoLibrary();
   });
+  els.dashboardPhotoLibraryGrid?.addEventListener("contextmenu", (event) => {
+    const card = event.target.closest("[data-photo-library-entry]");
+    if (!card) return;
+    event.preventDefault();
+    openProductPhotoLibraryContextMenu(productPhotoLibraryEntryByName(card.dataset.photoLibraryEntry || ""), event.clientX, event.clientY);
+  });
+  document.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-photo-library-context-action]");
+    if (action) {
+      const entry = productPhotoLibraryEntryByName(state.productPhotoLibrary.contextMenuName);
+      const kind = action.dataset.photoLibraryContextAction;
+      closeProductPhotoLibraryContextMenu();
+      if (kind === "rename") renameProductPhotoLibraryEntry(entry).catch(showError);
+      if (kind === "delete") deleteProductPhotoLibraryEntry(entry).catch(showError);
+      return;
+    }
+    if (!event.target.closest("#photo-library-context-menu")) closeProductPhotoLibraryContextMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeProductPhotoLibraryContextMenu();
+  });
+  window.addEventListener("resize", closeProductPhotoLibraryContextMenu);
+  window.addEventListener("scroll", closeProductPhotoLibraryContextMenu, true);
   els.dashboardPhotoInput?.addEventListener("change", () => {
     uploadProductPhotos(els.dashboardPhotoInput.files).catch((error) => {
       setProductPhotoUploadBusy(false);
