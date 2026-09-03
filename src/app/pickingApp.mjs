@@ -754,7 +754,7 @@ async function renameProductPhotoLibraryEntry(entry) {
   if (state.productPhotoLibrary.mutatingName) return;
 
   const nextName = window.prompt(
-    `새 파일명을 입력하세요.\n현재 유형(${productPhotoTypeLabel(entry.type)})은 그대로 유지됩니다.\n묶음/범위 사진은 이 카드 한 장만 이동합니다.`,
+    `이 사진을 연결할 새 SKU 파일명을 입력하세요.\n\n현재 연결: ${entry.code}.jpg\n입력 예: 8601.jpg 또는 8601-2.jpg\n\n※ 묶음/범위 사진은 지금 선택한 사진 한 장만 변경됩니다.`,
     `${entry.code}.jpg`,
   );
   if (nextName === null) return;
