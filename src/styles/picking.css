@@ -3946,23 +3946,50 @@ input {
   font-size: 14px;
 }
 
-.photo-viewer-head div {
+.photo-viewer-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+}
+
+.photo-viewer-zoom-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.photo-viewer-zoom-control input {
+  width: 58px;
+  min-height: 30px;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: #0f172a;
+  font: inherit;
+  text-align: right;
 }
 
 .photo-viewer-body {
   min-height: 0;
-  display: grid;
-  place-items: center;
+  overflow: auto;
   padding: 12px;
   background: #f8fafc;
 }
 
+.photo-viewer-canvas {
+  display: grid;
+  place-items: center;
+}
+
 .photo-viewer-body img {
-  max-width: 100%;
-  max-height: calc(94dvh - 82px);
-  object-fit: contain;
+  display: block;
+  max-width: none;
+  max-height: none;
   border-radius: 6px;
   background: #ffffff;
 }

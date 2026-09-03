@@ -30,6 +30,10 @@ const PRODUCT_PHOTO_GROUP_SUFFIX = ".__group";
 const PRODUCT_PHOTO_RANGE_SUFFIX = ".__range";
 const PRODUCT_PHOTO_MAX_DIMENSION = 2400;
 const PRODUCT_PHOTO_MAX_BYTES = 5 * 1024 * 1024;
+const PHOTO_VIEWER_ZOOM_STORAGE_KEY = "system-v3-photo-viewer-zoom";
+const PHOTO_VIEWER_ZOOM_MIN = 25;
+const PHOTO_VIEWER_ZOOM_MAX = 500;
+const PHOTO_VIEWER_ZOOM_DEFAULT = 100;
 const RECEIVING_LABEL_BUCKET = "system-v3-shared";
 const RECEIVING_LABEL_PATH = "receiving-label/current.csv";
 const RECEIVING_LABEL_CSV_HEADER = ["product_code", "own_code", "option_name", "qty"];
@@ -210,6 +214,7 @@ const state = {
     open: false,
     src: "",
     title: "",
+    zoom: PHOTO_VIEWER_ZOOM_DEFAULT,
   },
   productPhotoUpload: {
     running: false,
@@ -968,6 +973,56 @@ function photoImgAttrs(src, title = "", fallbackSrcs = []) {
   return `data-photo-src="${escapeHtml(src)}" data-photo-title="${escapeHtml(title)}"${fallbackAttr} onerror="var f=JSON.parse(this.dataset.photoFallbacks||'[]');if(f.length){var n=f.shift();this.dataset.photoFallbacks=JSON.stringify(f);this.src=n;this.dataset.photoSrc=n;}else{this.style.visibility='hidden'}"`;
 }
 
+function normalizePhotoViewerZoom(value) {
+  const zoom = Math.round(Number(value));
+  if (!Number.isFinite(zoom)) return PHOTO_VIEWER_ZOOM_DEFAULT;
+  return Math.min(PHOTO_VIEWER_ZOOM_MAX, Math.max(PHOTO_VIEWER_ZOOM_MIN, zoom));
+}
+
+function savedPhotoViewerZoom() {
+  try {
+    return normalizePhotoViewerZoom(window.localStorage.getItem(PHOTO_VIEWER_ZOOM_STORAGE_KEY));
+  } catch {
+    return PHOTO_VIEWER_ZOOM_DEFAULT;
+  }
+}
+
+function layoutPhotoViewerImage() {
+  const overlay = document.getElementById("photo-viewer-overlay");
+  if (!state.photoViewer.open || !overlay || overlay.hidden) return;
+  const body = overlay.querySelector(".photo-viewer-body");
+  const canvas = overlay.querySelector("#photo-viewer-canvas");
+  const image = overlay.querySelector("#photo-viewer-img");
+  if (!body || !canvas || !image?.naturalWidth || !image?.naturalHeight) return;
+
+  const availableWidth = Math.max(1, body.clientWidth - 24);
+  const availableHeight = Math.max(1, body.clientHeight - 24);
+  const fitRatio = Math.min(1, availableWidth / image.naturalWidth, availableHeight / image.naturalHeight);
+  const zoomRatio = state.photoViewer.zoom / 100;
+  const imageWidth = Math.max(1, Math.round(image.naturalWidth * fitRatio * zoomRatio));
+  const imageHeight = Math.max(1, Math.round(image.naturalHeight * fitRatio * zoomRatio));
+  image.style.width = `${imageWidth}px`;
+  image.style.height = `${imageHeight}px`;
+  canvas.style.width = `${Math.max(availableWidth, imageWidth)}px`;
+  canvas.style.height = `${Math.max(availableHeight, imageHeight)}px`;
+}
+
+function setPhotoViewerZoom(value, { persist = true } = {}) {
+  const zoom = normalizePhotoViewerZoom(value);
+  state.photoViewer.zoom = zoom;
+  const input = document.getElementById("photo-viewer-zoom");
+  if (input) input.value = String(zoom);
+  if (persist) {
+    try {
+      window.localStorage.setItem(PHOTO_VIEWER_ZOOM_STORAGE_KEY, String(zoom));
+    } catch {
+      // Restricted browser modes keep the selected zoom only for the current page.
+    }
+  }
+  window.requestAnimationFrame(layoutPhotoViewerImage);
+  return zoom;
+}
+
 function ensurePhotoViewer() {
   let overlay = document.getElementById("photo-viewer-overlay");
   if (overlay) return overlay;
@@ -978,16 +1033,22 @@ function ensurePhotoViewer() {
   overlay.innerHTML = `<div class="photo-viewer" role="dialog" aria-modal="true" aria-label="상품 사진 확대">
     <div class="photo-viewer-head">
       <strong id="photo-viewer-title">상품 사진</strong>
-      <div>
+      <div class="photo-viewer-actions">
+        <label class="photo-viewer-zoom-control">배율
+          <input id="photo-viewer-zoom" type="number" min="${PHOTO_VIEWER_ZOOM_MIN}" max="${PHOTO_VIEWER_ZOOM_MAX}" step="1" inputmode="numeric" aria-label="사진 확대 배율">%
+        </label>
+        <button class="btn" data-photo-action="zoom-apply" type="button">적용</button>
         <button class="btn" data-photo-action="refresh" type="button">새로고침</button>
         <button class="btn" data-photo-action="close" type="button">닫기</button>
       </div>
     </div>
     <div class="photo-viewer-body">
-      <img id="photo-viewer-img" alt="">
+      <div id="photo-viewer-canvas" class="photo-viewer-canvas"><img id="photo-viewer-img" alt=""></div>
     </div>
   </div>`;
   document.body.appendChild(overlay);
+  overlay.querySelector("#photo-viewer-img")?.addEventListener("load", layoutPhotoViewerImage);
+  setPhotoViewerZoom(savedPhotoViewerZoom(), { persist: false });
   return overlay;
 }
 
@@ -999,10 +1060,16 @@ function bustImageUrl(src) {
 function openPhotoViewer(src, title = "") {
   if (!src) return;
   const overlay = ensurePhotoViewer();
-  state.photoViewer = { open: true, src, title };
+  state.photoViewer = { open: true, src, title, zoom: savedPhotoViewerZoom() };
   overlay.hidden = false;
   overlay.querySelector("#photo-viewer-title").textContent = title || "상품 사진";
-  overlay.querySelector("#photo-viewer-img").src = src;
+  const image = overlay.querySelector("#photo-viewer-img");
+  image.style.width = "";
+  image.style.height = "";
+  overlay.querySelector("#photo-viewer-canvas").style.cssText = "";
+  setPhotoViewerZoom(state.photoViewer.zoom, { persist: false });
+  image.src = src;
+  if (image.complete) window.requestAnimationFrame(layoutPhotoViewerImage);
 }
 
 function closePhotoViewer() {
@@ -9671,7 +9738,14 @@ function bindEvents() {
     if (!photoAction) return;
     if (photoAction.dataset.photoAction === "close") closePhotoViewer();
     if (photoAction.dataset.photoAction === "refresh") refreshPhotoViewer();
+    if (photoAction.dataset.photoAction === "zoom-apply") setPhotoViewerZoom(document.getElementById("photo-viewer-zoom")?.value);
   });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.target?.id !== "photo-viewer-zoom") return;
+    event.preventDefault();
+    setPhotoViewerZoom(event.target.value);
+  });
+  window.addEventListener("resize", () => window.requestAnimationFrame(layoutPhotoViewerImage));
   els.shortageFilterBar?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-shortage-filter]");
     if (!button) return;
