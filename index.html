@@ -157,6 +157,29 @@
                   </div>
                 </div>
                 <div id="dashboard-photo-upload-status" class="dashboard-photo-upload-status" aria-live="polite">업로드할 사진을 선택하거나 드래그하세요.</div>
+                <section class="dashboard-photo-library" aria-labelledby="dashboard-photo-library-title">
+                  <div class="dashboard-photo-library-head">
+                    <div>
+                      <h4 id="dashboard-photo-library-title">사진 라이브러리</h4>
+                      <p>저장된 상품 사진을 찾아보고 확대해서 확인할 수 있습니다. 이름 변경과 삭제는 권한 설정 후 추가됩니다.</p>
+                    </div>
+                    <button class="btn" data-dashboard-action="photo-library-refresh" type="button">새로고침</button>
+                  </div>
+                  <div class="dashboard-photo-library-controls">
+                    <input id="dashboard-photo-search" type="search" autocomplete="off" placeholder="SKU 또는 파일명 검색">
+                    <select id="dashboard-photo-filter" aria-label="사진 유형 필터">
+                      <option value="all">전체 유형</option>
+                      <option value="direct">전용 파일</option>
+                      <option value="group">개별번호 묶음</option>
+                      <option value="range">범위 사진</option>
+                      <option value="common">공용 prefix</option>
+                    </select>
+                    <button class="btn primary" data-dashboard-action="photo-library-search" type="button">검색</button>
+                  </div>
+                  <div id="dashboard-photo-library-status" class="dashboard-photo-library-status" aria-live="polite">사진 목록을 불러오는 중입니다.</div>
+                  <div id="dashboard-photo-library-grid" class="dashboard-photo-library-grid" aria-live="polite"></div>
+                  <button id="dashboard-photo-library-more" class="btn dashboard-photo-library-more" data-dashboard-action="photo-library-more" type="button" hidden>사진 더 불러오기</button>
+                </section>
               </div>
             </div>
             <div id="dashboard-summary" class="dashboard-summary"></div>

@@ -215,6 +215,16 @@ const state = {
     running: false,
     versions: new Map(),
   },
+  productPhotoLibrary: {
+    entries: [],
+    loaded: false,
+    loading: false,
+    error: "",
+    offset: 0,
+    hasMore: true,
+    search: "",
+    type: "all",
+  },
   inventoryCountExportRunning: false,
 };
 
@@ -270,6 +280,11 @@ const els = {
   dashboardPhotoDropzone: document.getElementById("dashboard-photo-dropzone"),
   dashboardPhotoUploadBtn: document.getElementById("dashboard-photo-upload-btn"),
   dashboardPhotoUploadStatus: document.getElementById("dashboard-photo-upload-status"),
+  dashboardPhotoSearch: document.getElementById("dashboard-photo-search"),
+  dashboardPhotoFilter: document.getElementById("dashboard-photo-filter"),
+  dashboardPhotoLibraryStatus: document.getElementById("dashboard-photo-library-status"),
+  dashboardPhotoLibraryGrid: document.getElementById("dashboard-photo-library-grid"),
+  dashboardPhotoLibraryMore: document.getElementById("dashboard-photo-library-more"),
   dashboardInventoryCountExportBtn: document.getElementById("dashboard-inventory-count-export-btn"),
   orderList: document.getElementById("order-list"),
   panelSubtitle: document.getElementById("panel-subtitle"),
@@ -634,7 +649,156 @@ async function uploadProductPhotos(fileList) {
     ...failures,
   ];
   renderProductPhotoUploadStatus({ message: summary, tone: failures.length ? "warn" : "success", details });
+  if (successes.length) loadProductPhotoLibrary({ reset: true }).catch(() => {});
   toast(summary);
+}
+
+function productPhotoLibraryEntry(file = {}) {
+  const name = String(file.name || "").trim();
+  if (!/\.jpg$/i.test(name)) return null;
+  const storageCode = name.replace(/\.jpg$/i, "");
+  if (!storageCode || /[\\/]/.test(storageCode)) return null;
+
+  let type = "direct";
+  let code = storageCode;
+  if (storageCode.endsWith(PRODUCT_PHOTO_GROUP_SUFFIX)) {
+    type = "group";
+    code = storageCode.slice(0, -PRODUCT_PHOTO_GROUP_SUFFIX.length);
+  } else if (storageCode.endsWith(PRODUCT_PHOTO_RANGE_SUFFIX)) {
+    type = "range";
+    code = storageCode.slice(0, -PRODUCT_PHOTO_RANGE_SUFFIX.length);
+  } else if (!/^.+-\d+$/.test(storageCode)) {
+    type = "common";
+  }
+  if (!code) return null;
+
+  return {
+    name,
+    storageCode,
+    code,
+    type,
+    updatedAt: String(file.updated_at || file.created_at || ""),
+    bytes: Number(file.metadata?.size || 0),
+  };
+}
+
+function productPhotoTypeLabel(type) {
+  return ({ direct: "전용 파일", group: "개별번호 묶음", range: "범위 사진", common: "공용 prefix" })[type] || "사진";
+}
+
+function productPhotoSizeLabel(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "용량 정보 없음";
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function productPhotoDateLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "날짜 정보 없음";
+  return date.toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" });
+}
+
+function visibleProductPhotoEntries() {
+  const library = state.productPhotoLibrary;
+  const search = String(library.search || "").trim().toLowerCase();
+  return library.entries.filter((entry) => {
+    if (library.type !== "all" && entry.type !== library.type) return false;
+    return !search || `${entry.code} ${entry.name}`.toLowerCase().includes(search);
+  });
+}
+
+function renderProductPhotoLibrary() {
+  if (!els.dashboardPhotoLibraryGrid || !els.dashboardPhotoLibraryStatus) return;
+  const library = state.productPhotoLibrary;
+  const entries = visibleProductPhotoEntries();
+  if (library.error) {
+    els.dashboardPhotoLibraryStatus.className = "dashboard-photo-library-status error";
+    els.dashboardPhotoLibraryStatus.textContent = `사진 목록을 불러오지 못했습니다: ${library.error}`;
+  } else if (library.loading) {
+    els.dashboardPhotoLibraryStatus.className = "dashboard-photo-library-status";
+    els.dashboardPhotoLibraryStatus.textContent = library.entries.length ? `사진 ${library.entries.length}개를 불러왔습니다. 추가 목록을 읽는 중입니다.` : "사진 목록을 불러오는 중입니다.";
+  } else if (!library.loaded) {
+    els.dashboardPhotoLibraryStatus.className = "dashboard-photo-library-status";
+    els.dashboardPhotoLibraryStatus.textContent = "사진 목록을 불러오는 중입니다.";
+  } else {
+    els.dashboardPhotoLibraryStatus.className = "dashboard-photo-library-status";
+    els.dashboardPhotoLibraryStatus.textContent = `사진 ${entries.length}개 표시 · ${library.hasMore ? "더 불러올 수 있습니다." : "전체 목록을 불러왔습니다."}`;
+  }
+
+  if (!entries.length) {
+    const message = library.loading ? "사진 목록을 읽는 중입니다." : library.loaded ? "조건에 맞는 사진이 없습니다." : "사진 목록을 불러오는 중입니다.";
+    els.dashboardPhotoLibraryGrid.innerHTML = `<div class="dashboard-photo-library-empty">${escapeHtml(message)}</div>`;
+  } else {
+    els.dashboardPhotoLibraryGrid.innerHTML = entries
+      .map((entry) => {
+        const imageUrl = productImageUrlForCode(entry.storageCode);
+        const title = `${entry.code} · ${productPhotoTypeLabel(entry.type)}`;
+        return `<article class="dashboard-photo-library-item">
+          <button class="dashboard-photo-library-thumb" type="button" ${photoImgAttrs(imageUrl, title)} aria-label="${escapeHtml(title)} 사진 확대">
+            <img src="${escapeHtml(imageUrl)}" ${photoImgAttrs(imageUrl, title)} alt="${escapeHtml(entry.code)}" loading="lazy">
+          </button>
+          <div class="dashboard-photo-library-body">
+            <span class="dashboard-photo-library-type ${escapeHtml(entry.type)}">${escapeHtml(productPhotoTypeLabel(entry.type))}</span>
+            <strong title="${escapeHtml(entry.code)}">${escapeHtml(entry.code)}</strong>
+            <span title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span>
+            <span>${escapeHtml(productPhotoDateLabel(entry.updatedAt))} · ${escapeHtml(productPhotoSizeLabel(entry.bytes))}</span>
+          </div>
+        </article>`;
+      })
+      .join("");
+  }
+  if (els.dashboardPhotoLibraryMore) {
+    els.dashboardPhotoLibraryMore.hidden = library.loading || !library.hasMore || Boolean(library.error);
+    els.dashboardPhotoLibraryMore.disabled = library.loading;
+  }
+}
+
+async function loadProductPhotoLibrary({ reset = false } = {}) {
+  const library = state.productPhotoLibrary;
+  if (!els.dashboardPhotoLibraryGrid || library.loading) return;
+  if (reset) {
+    library.entries = [];
+    library.offset = 0;
+    library.hasMore = true;
+    library.loaded = false;
+    library.error = "";
+  }
+  if (!library.hasMore) {
+    renderProductPhotoLibrary();
+    return;
+  }
+
+  library.loading = true;
+  library.error = "";
+  renderProductPhotoLibrary();
+  const pageSize = 80;
+  try {
+    const { data, error } = await imageDb.storage.from(IMAGE_BUCKET).list(PRODUCT_PHOTO_FOLDER, {
+      limit: pageSize,
+      offset: library.offset,
+      sortBy: { column: "name", order: "asc" },
+      ...(library.search ? { search: library.search } : {}),
+    });
+    if (error) throw error;
+    const incoming = (data || []).map(productPhotoLibraryEntry).filter(Boolean);
+    const existing = new Set(library.entries.map((entry) => entry.name));
+    library.entries.push(...incoming.filter((entry) => !existing.has(entry.name)));
+    library.offset += (data || []).length;
+    library.hasMore = (data || []).length === pageSize;
+    library.loaded = true;
+  } catch (error) {
+    library.error = error?.message || String(error || "알 수 없는 오류");
+  } finally {
+    library.loading = false;
+    renderProductPhotoLibrary();
+  }
+}
+
+function searchProductPhotoLibrary() {
+  state.productPhotoLibrary.search = String(els.dashboardPhotoSearch?.value || "").trim();
+  state.productPhotoLibrary.type = String(els.dashboardPhotoFilter?.value || "all");
+  loadProductPhotoLibrary({ reset: true }).catch(() => {});
 }
 
 function photoTitleForItem(item = {}) {
@@ -2115,6 +2279,10 @@ function renderDashboard() {
             <p>미송피킹/검품은 선택 날짜가 아니라 workflow event 상태 기준으로 집계됩니다.</p>`
       }
     </div>`;
+  renderProductPhotoLibrary();
+  if (!state.productPhotoLibrary.loaded && !state.productPhotoLibrary.loading && !state.productPhotoLibrary.error) {
+    loadProductPhotoLibrary().catch(() => {});
+  }
 }
 
 function orderListModalRows() {
@@ -9222,6 +9390,22 @@ function bindEvents() {
       }
       els.dashboardPhotoInput?.click();
     }
+    if (button.dataset.dashboardAction === "photo-library-refresh") {
+      loadProductPhotoLibrary({ reset: true }).catch(() => {});
+    }
+    if (button.dataset.dashboardAction === "photo-library-search") {
+      searchProductPhotoLibrary();
+    }
+    if (button.dataset.dashboardAction === "photo-library-more") {
+      loadProductPhotoLibrary().catch(() => {});
+    }
+  });
+  els.dashboardPhotoSearch?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") searchProductPhotoLibrary();
+  });
+  els.dashboardPhotoFilter?.addEventListener("change", () => {
+    state.productPhotoLibrary.type = String(els.dashboardPhotoFilter.value || "all");
+    renderProductPhotoLibrary();
   });
   els.dashboardPhotoInput?.addEventListener("change", () => {
     uploadProductPhotos(els.dashboardPhotoInput.files).catch((error) => {
