@@ -851,6 +851,19 @@ function openProductPhotoLibraryContextMenu(entry, clientX, clientY) {
   menu.style.visibility = "";
 }
 
+function openProductPhotoLibraryContextMenuFromEvent(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const card = target?.closest("[data-photo-library-entry]");
+  if (!card) return false;
+  event.preventDefault();
+  openProductPhotoLibraryContextMenu(
+    productPhotoLibraryEntryByName(card.dataset.photoLibraryEntry || ""),
+    event.clientX,
+    event.clientY,
+  );
+  return true;
+}
+
 function renderProductPhotoLibrary() {
   if (!els.dashboardPhotoLibraryGrid || !els.dashboardPhotoLibraryStatus) return;
   const library = state.productPhotoLibrary;
@@ -9551,12 +9564,9 @@ function bindEvents() {
     state.productPhotoLibrary.type = String(els.dashboardPhotoFilter.value || "all");
     renderProductPhotoLibrary();
   });
-  els.dashboardPhotoLibraryGrid?.addEventListener("contextmenu", (event) => {
-    const card = event.target.closest("[data-photo-library-entry]");
-    if (!card) return;
-    event.preventDefault();
-    openProductPhotoLibraryContextMenu(productPhotoLibraryEntryByName(card.dataset.photoLibraryEntry || ""), event.clientX, event.clientY);
-  });
+  // Capture this before thumbnail/modal handlers so a photo-card right click is
+  // never mistaken for the normal image-click interaction in a browser.
+  document.addEventListener("contextmenu", openProductPhotoLibraryContextMenuFromEvent, true);
   document.addEventListener("click", (event) => {
     const action = event.target.closest("[data-photo-library-context-action]");
     if (action) {
